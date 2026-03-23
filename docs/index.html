@@ -13,51 +13,156 @@
 </head>
 <body>
   <header class="topbar">
-    <div>
-      <h1>US Measles County Risk Forecast</h1>
-      <p>County-level forecast focused on overall risk score and new-case emergence risk</p>
+    <div class="topbar-inner">
+      <div class="hero-copy">
+        <div class="eyebrow">Public Health Risk Intelligence</div>
+        <h1>US Measles County Risk Forecast</h1>
+        <p class="hero-subtitle">
+          A county-level rare-event forecasting tool designed to highlight where measles may
+          <strong>emerge next</strong>, where it may <strong>spread faster</strong>, and which counties
+          warrant the most attention overall.
+        </p>
+      </div>
+
+      <div class="hero-card">
+        <div class="hero-card-label">Primary view</div>
+        <div class="hero-card-value">Overall County Risk</div>
+        <div class="hero-card-text">
+          Best interpreted as a relative risk ranking, not a guaranteed case forecast.
+        </div>
+      </div>
     </div>
   </header>
 
   <section class="controls">
-    <label>
-      Forecast horizon
-      <select id="horizonSelect">
-        <option value="1">1 week</option>
-        <option value="2">2 weeks</option>
-        <option value="3">3 weeks</option>
-        <option value="4">4 weeks</option>
-      </select>
-    </label>
+    <div class="controls-inner">
+      <label>
+        Forecast horizon
+        <select id="horizonSelect">
+          <option value="1">1 week</option>
+          <option value="2">2 weeks</option>
+          <option value="3">3 weeks</option>
+          <option value="4">4 weeks</option>
+        </select>
+      </label>
 
-    <label>
-      Map metric
-      <select id="metricSelect">
-        <option value="risk_score">Overall risk score</option>
-        <option value="risk_new_cases_county">Risk of new county cases</option>
-        <option value="expected_growth_abs">Expected growth by number</option>
-        <option value="expected_growth_pct">Expected growth by percentage</option>
-      </select>
-    </label>
+      <label>
+        Map metric
+        <select id="metricSelect">
+          <option value="risk_score">Overall County Risk</option>
+          <option value="risk_new_cases_county">Emergence Risk</option>
+          <option value="growth_pressure_score">Spread Pressure</option>
+        </select>
+      </label>
+    </div>
   </section>
 
   <main class="page">
     <section class="map-section">
+      <div class="section-header">
+        <div>
+          <div class="section-kicker">Interactive map</div>
+          <h2>County Risk Surface</h2>
+        </div>
+        <p class="section-note">
+          The map is most useful for comparing counties to one another within the selected horizon.
+        </p>
+      </div>
+
       <div id="map"></div>
       <div class="legend" id="legend"></div>
     </section>
 
-    <section class="tables-section">
+    <section id="methodology" class="methodology-section">
       <div class="card">
-        <h2>Highest Overall Risk Score</h2>
+        <div class="section-kicker">Methodology</div>
+        <h2>How to read this model</h2>
+
+        <p>
+          This is a <strong>county-level rare-event risk model</strong>. Because measles is highly intermittent
+          at the county-week level, the outputs are best interpreted as <strong>relative risk rankings</strong>
+          rather than literal predictions of guaranteed future case counts.
+        </p>
+
+        <div class="formula-box">
+          <div class="formula-label">Overall County Risk formula</div>
+          <p class="formula">
+            Risk Score =
+            0.40 × Emergence Risk +
+            0.20 × log(1 + Expected Growth Context) +
+            0.15 × log(1 + Importation Pressure) +
+            0.15 × log(1 + Recent Cases) +
+            0.10 × Susceptibility
+          </p>
+        </div>
+
+        <h2>Model Inputs and Variables</h2>
+
+        <div class="info-grid">
+          <div class="info-tile">
+            <h3>Case History</h3>
+            <p>
+              The model uses recent measles case history including cases in the past week,
+              past month, and cumulative cases. These variables help identify active outbreak
+              clusters and areas with ongoing transmission.
+            </p>
+          </div>
+
+          <div class="info-tile">
+            <h3>Movement / Importation Pressure</h3>
+            <p>
+              County-to-county commuting flows and nearby county case activity are used to
+              estimate importation pressure. This represents the likelihood that measles
+              cases may be introduced into a county from other areas.
+            </p>
+          </div>
+
+          <div class="info-tile">
+            <h3>Vaccination / Susceptibility</h3>
+            <p>
+              Vaccination coverage and exemption data are used to estimate a susceptibility
+              proxy. Counties with lower vaccination coverage or higher exemption rates are
+              considered more vulnerable if measles is introduced.
+            </p>
+          </div>
+
+          <div class="info-tile">
+            <h3>Geography / Spatial Spread</h3>
+            <p>
+              County geography, neighboring counties, and distance to recent outbreak areas
+              are used to model spatial spread and regional clustering of cases.
+            </p>
+          </div>
+        </div>
+
+        <p>
+          <strong>Data sources:</strong> Johns Hopkins measles case updates, CDC vaccination and exemption data,
+          U.S. Census commuting flows, and U.S. Census county geography.
+        </p>
+
+        <div class="prototype-note">
+          <strong>Disclaimer:</strong>
+          This site is an exploratory prototype for county-level measles risk ranking and
+          outbreak analysis. The model outputs represent relative risk rankings and not
+          guaranteed future case counts. This tool is intended for exploratory analysis,
+          prioritization, and discussion, and should not be used as the sole basis for
+          public health decisions.
+        </div>
+      </div>
+    </section>
+
+    <section id="rankings" class="tables-section">
+      <div class="card">
+        <div class="section-kicker">Rankings</div>
+        <h2>Highest Overall County Risk</h2>
         <table id="tableAbs">
           <thead>
             <tr>
               <th>County</th>
               <th>State</th>
-              <th>Risk Score</th>
-              <th>New Case Risk</th>
-              <th>Growth</th>
+              <th>Overall Risk</th>
+              <th>Emergence Risk %</th>
+              <th>Spread Pressure</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -65,15 +170,16 @@
       </div>
 
       <div class="card">
-        <h2>Highest Risk of Starting New Cases</h2>
+        <div class="section-kicker">Rankings</div>
+        <h2>Highest Emergence Risk</h2>
         <table id="tablePct">
           <thead>
             <tr>
               <th>County</th>
               <th>State</th>
-              <th>Risk Score</th>
-              <th>New Case Risk</th>
-              <th>Growth</th>
+              <th>Overall Risk</th>
+              <th>Emergence Risk %</th>
+              <th>Spread Pressure</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -81,15 +187,16 @@
       </div>
 
       <div class="card">
-        <h2>Highest Expected Growth by Number</h2>
+        <div class="section-kicker">Rankings</div>
+        <h2>Highest Spread Pressure</h2>
         <table id="tableNew">
           <thead>
             <tr>
               <th>County</th>
               <th>State</th>
-              <th>Risk Score</th>
-              <th>New Case Risk</th>
-              <th>Growth</th>
+              <th>Overall Risk</th>
+              <th>Emergence Risk %</th>
+              <th>Spread Pressure</th>
             </tr>
           </thead>
           <tbody></tbody>

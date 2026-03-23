@@ -10,8 +10,8 @@ const metricSelect = document.getElementById("metricSelect");
 const metricLabels = {
   risk_score: "Overall risk score",
   risk_new_cases_county: "Risk of new county cases",
-  expected_growth_abs: "Expected growth by number",
-  expected_growth_pct: "Expected growth by percentage"
+  growth_pressure_score: "Growth pressure score",
+  expected_growth_abs: "Expected growth by number"
 };
 
 async function loadJSON(path) {
@@ -42,9 +42,6 @@ function buildLookup(rows) {
   return out;
 }
 
-// Keeps the stronger old red/orange scheme,
-// but rescales it to the current data range so the map
-// does not look flat when all values are small.
 function getColorScaled(value, minVal, maxVal) {
   if (!Number.isFinite(value)) value = 0;
   if (!Number.isFinite(minVal)) minVal = 0;
@@ -61,16 +58,6 @@ function getColorScaled(value, minVal, maxVal) {
          t > 0.30 ? "#FD8D3C" :
          t > 0.15 ? "#FEB24C" :
                     "#FFEDA0";
-}
-
-function formatValue(metric, value) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "";
-
-  if (metric === "expected_growth_abs") {
-    return Number(value).toFixed(4);
-  }
-
-  return Number(value).toFixed(4);
 }
 
 function renderLegend(metric, minVal, maxVal) {
@@ -118,7 +105,10 @@ function renderMap() {
       f.properties.expected_growth_abs = Number(row.expected_growth_abs || 0);
       f.properties.expected_growth_pct = Number(row.expected_growth_pct || 0);
       f.properties.risk_new_cases_county = Number(row.risk_new_cases_county || 0);
+      f.properties.new_cases_risk_pct = Number(row.new_cases_risk_pct || 0);
       f.properties.risk_score = Number(row.risk_score || 0);
+      f.properties.risk_score_percentile = Number(row.risk_score_percentile || 0);
+      f.properties.growth_pressure_score = Number(row.growth_pressure_score || 0);
     } else {
       f.properties.metricValue = 0;
       f.properties.county = f.properties.NAME || "";
@@ -126,7 +116,10 @@ function renderMap() {
       f.properties.expected_growth_abs = 0;
       f.properties.expected_growth_pct = 0;
       f.properties.risk_new_cases_county = 0;
+      f.properties.new_cases_risk_pct = 0;
       f.properties.risk_score = 0;
+      f.properties.risk_score_percentile = 0;
+      f.properties.growth_pressure_score = 0;
     }
   });
 
@@ -145,9 +138,10 @@ function renderMap() {
           <strong>${p.county || "County"}</strong><br/>
           State: ${p.state || ""}<br/>
           Overall risk score: ${Number(p.risk_score || 0).toFixed(4)}<br/>
-          New county case risk: ${Number(p.risk_new_cases_county || 0).toFixed(4)}<br/>
-          Expected growth by number: ${Number(p.expected_growth_abs || 0).toFixed(4)}<br/>
-          Expected growth by percentage: ${Number(p.expected_growth_pct || 0).toFixed(4)}
+          Overall risk percentile: ${Number(p.risk_score_percentile || 0).toFixed(1)}<br/>
+          New county case risk: ${Number(p.new_cases_risk_pct || 0).toFixed(2)}%<br/>
+          Growth pressure score: ${Number(p.growth_pressure_score || 0).toFixed(1)}<br/>
+          Expected growth by number: ${Number(p.expected_growth_abs || 0).toFixed(4)}
         </div>
       `;
       layer.bindPopup(html);
@@ -167,8 +161,8 @@ function fillTable(tableId, rows) {
       <td>${r.county || ""}</td>
       <td>${r.state || ""}</td>
       <td>${Number(r.risk_score || 0).toFixed(4)}</td>
-      <td>${Number(r.risk_new_cases_county || 0).toFixed(4)}</td>
-      <td>${Number(r.expected_growth_abs || 0).toFixed(4)}</td>
+      <td>${Number(r.new_cases_risk_pct || 0).toFixed(2)}%</td>
+      <td>${Number(r.growth_pressure_score || 0).toFixed(1)}</td>
     `;
     tbody.appendChild(tr);
   });
@@ -181,7 +175,7 @@ function renderTables() {
 
   fillTable("tableAbs", data.top_risk_score || []);
   fillTable("tablePct", data.top_new_area_risk || []);
-  fillTable("tableNew", data.top_growth_abs || []);
+  fillTable("tableNew", data.top_growth_pressure || []);
 }
 
 function rerender() {
