@@ -903,7 +903,8 @@ def train_forecast_models(panel: pd.DataFrame, horizons: int) -> Tuple[pd.DataFr
 
         scored = latest[[
             "county_fips", "county", "state", "week", "cumulative_cases", "new_cases_week",
-            "state_abbr", "centroid_lat", "centroid_lon"
+            "state_abbr", "centroid_lat", "centroid_lon",
+            "importation_pressure", "cases_last_4w", "susceptible_proxy"
         ]].copy()
 
         scored["horizon_weeks"] = h
@@ -949,6 +950,47 @@ def write_web_outputs(forecast: pd.DataFrame, outdir: Path) -> None:
     forecast["week"] = forecast["week"].astype(str)
     forecast["forecast_week"] = forecast["forecast_week"].astype(str)
 
+    # Smoothed display version of new-county risk for rare-event settings
+    emergence_signal = (
+        0.45 * forecast["risk_new_cases_county"].fillna(0) +
+        0.20 * np.log1p(forecast["importation_pressure"].fillna(0)) +
+        0.20 * np.log1p(forecast["cases_last_4w"].fillna(0)) +
+        0.15 * (forecast["susceptible_proxy"].fillna(7.5) / 10.0)
+    )
+
+    # Convert to within-horizon 0-100 scale
+    forecast["new_cases_risk_pct"] = (
+        emergence_signal.groupby(forecast["horizon_weeks"])
+        .rank(pct=True, method="average") * 100
+    )
+
+    forecast["growth_pressure_score"] = (
+        0.45 * np.log1p(forecast["expected_growth_abs"].fillna(0)) +
+        0.25 * np.log1p(forecast["importation_pressure"].fillna(0)) +
+        0.20 * np.log1p(forecast["cases_last_4w"].fillna(0)) +
+        0.10 * (forecast["susceptible_proxy"].fillna(7.5) / 10.0)
+    )
+
+    # Convert growth pressure to within-horizon 0-100 scale
+    forecast["growth_pressure_score"] = (
+        forecast.groupby("horizon_weeks")["growth_pressure_score"]
+        .rank(pct=True, method="average") * 100
+    )
+
+    # Recompute display risk score using smoothed emergence score
+    forecast["risk_score"] = (
+        0.40 * (forecast["new_cases_risk_pct"] / 100.0) +
+        0.20 * np.log1p(forecast["expected_growth_abs"].fillna(0)) +
+        0.15 * np.log1p(forecast["importation_pressure"].fillna(0)) +
+        0.15 * np.log1p(forecast["cases_last_4w"].fillna(0)) +
+        0.10 * (forecast["susceptible_proxy"].fillna(7.5) / 10.0)
+    )
+
+    forecast["risk_score_percentile"] = (
+        forecast.groupby("horizon_weeks")["risk_score"]
+        .rank(pct=True, method="average") * 100
+    )
+
     forecast.to_csv(outdir / "county_measles_forecast.csv", index=False)
 
     forecast_clean = forecast.replace({np.nan: None})
@@ -964,28 +1006,34 @@ def write_web_outputs(forecast: pd.DataFrame, outdir: Path) -> None:
                 dfh.sort_values("risk_score", ascending=False)
                    .head(50)[[
                        "county_fips", "county", "state",
-                       "risk_score", "risk_new_cases_county",
-                       "expected_growth_abs", "expected_growth_pct"
+                       "risk_score", "risk_score_percentile",
+                       "risk_new_cases_county", "new_cases_risk_pct",
+                       "expected_growth_abs", "expected_growth_pct",
+                       "growth_pressure_score"
                    ]]
                    .replace({np.nan: None})
                    .to_dict(orient="records")
             ),
             "top_new_area_risk": (
-                dfh.sort_values("risk_new_cases_county", ascending=False)
+                dfh.sort_values("new_cases_risk_pct", ascending=False)
                    .head(50)[[
                        "county_fips", "county", "state",
-                       "risk_score", "risk_new_cases_county",
-                       "expected_growth_abs", "expected_growth_pct"
+                       "risk_score", "risk_score_percentile",
+                       "risk_new_cases_county", "new_cases_risk_pct",
+                       "expected_growth_abs", "expected_growth_pct",
+                       "growth_pressure_score"
                    ]]
                    .replace({np.nan: None})
                    .to_dict(orient="records")
             ),
-            "top_growth_abs": (
-                dfh.sort_values("expected_growth_abs", ascending=False)
+            "top_growth_pressure": (
+                dfh.sort_values("growth_pressure_score", ascending=False)
                    .head(50)[[
                        "county_fips", "county", "state",
-                       "risk_score", "risk_new_cases_county",
-                       "expected_growth_abs", "expected_growth_pct"
+                       "risk_score", "risk_score_percentile",
+                       "risk_new_cases_county", "new_cases_risk_pct",
+                       "expected_growth_abs", "expected_growth_pct",
+                       "growth_pressure_score"
                    ]]
                    .replace({np.nan: None})
                    .to_dict(orient="records")
@@ -1017,14 +1065,20 @@ def write_web_outputs(forecast: pd.DataFrame, outdir: Path) -> None:
             props["expected_growth_abs"] = 0.0 if row["expected_growth_abs"] is None else float(row["expected_growth_abs"])
             props["expected_growth_pct"] = 0.0 if row["expected_growth_pct"] is None else float(row["expected_growth_pct"])
             props["risk_new_cases_county"] = 0.0 if row["risk_new_cases_county"] is None else float(row["risk_new_cases_county"])
+            props["new_cases_risk_pct"] = 0.0 if row["new_cases_risk_pct"] is None else float(row["new_cases_risk_pct"])
             props["risk_score"] = 0.0 if row["risk_score"] is None else float(row["risk_score"])
+            props["risk_score_percentile"] = 0.0 if row["risk_score_percentile"] is None else float(row["risk_score_percentile"])
+            props["growth_pressure_score"] = 0.0 if row["growth_pressure_score"] is None else float(row["growth_pressure_score"])
         else:
             props["county"] = props.get("NAME", "")
             props["state"] = ""
             props["expected_growth_abs"] = 0.0
             props["expected_growth_pct"] = 0.0
             props["risk_new_cases_county"] = 0.0
+            props["new_cases_risk_pct"] = 0.0
             props["risk_score"] = 0.0
+            props["risk_score_percentile"] = 0.0
+            props["growth_pressure_score"] = 0.0
 
         feature["properties"] = props
 
@@ -1039,7 +1093,7 @@ def write_web_outputs(forecast: pd.DataFrame, outdir: Path) -> None:
 
     with open(web_data_dir / "forecast_by_horizon.json", "w", encoding="utf-8") as f:
         json.dump(horizon_dict, f, indent=2, allow_nan=False)
-
+            
 # =========================
 # MAIN
 # =========================
