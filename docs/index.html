@@ -50,10 +50,29 @@
         Map metric
         <select id="metricSelect">
           <option value="risk_score">Overall County Risk</option>
-          <option value="risk_new_cases_county">Emergence Risk</option>
-          <option value="growth_pressure_score">Spread Pressure</option>
+          <option value="new_cases_risk_pct">Emergence (New to Area Cases) Risk</option>
+          <option value="growth_pressure_score">Spread Pressure (Total Cases)</option>
         </select>
       </label>
+    </div>
+  </section>
+
+  <section class="meta-bar">
+    <div class="meta-inner">
+      <div class="meta-item">
+        <div class="meta-label">Last Date of Data</div>
+        <div class="meta-value" id="lastDataDate">—</div>
+      </div>
+
+      <div class="meta-item">
+        <div class="meta-label">Last Refreshed</div>
+        <div class="meta-value" id="lastRefreshed">—</div>
+      </div>
+
+      <div class="meta-item">
+        <div class="meta-label">Forecast Week Of</div>
+        <div class="meta-value" id="forecastWeek">—</div>
+      </div>
     </div>
   </section>
 
@@ -88,11 +107,10 @@
           <div class="formula-label">Overall County Risk formula</div>
           <p class="formula">
             Risk Score =
-            0.40 × Emergence Risk +
-            0.20 × log(1 + Expected Growth Context) +
-            0.15 × log(1 + Importation Pressure) +
-            0.15 × log(1 + Recent Cases) +
-            0.10 × Susceptibility
+            0.35 × Emergence Risk +
+            0.35 × Spread Pressure +
+            0.20 × Importation Context +
+            0.10 × Susceptibility / Seasonality Context
           </p>
         </div>
 
@@ -103,8 +121,8 @@
             <h3>Case History</h3>
             <p>
               The model uses recent measles case history including cases in the past week,
-              past month, and cumulative cases. These variables help identify active outbreak
-              clusters and areas with ongoing transmission.
+              past month, cumulative cases, and lagged case trends to identify active outbreak
+              clusters and recent transmission.
             </p>
           </div>
 
@@ -112,7 +130,7 @@
             <h3>Movement / Importation Pressure</h3>
             <p>
               County-to-county commuting flows and nearby county case activity are used to
-              estimate importation pressure. This represents the likelihood that measles
+              estimate importation pressure, representing the likelihood that measles
               cases may be introduced into a county from other areas.
             </p>
           </div>
@@ -133,12 +151,43 @@
               are used to model spatial spread and regional clustering of cases.
             </p>
           </div>
+
+          <div class="info-tile">
+            <h3>County Population</h3>
+            <p>
+              County population from the Census API is used when available to improve incidence
+              and spread normalization across counties of different sizes.
+            </p>
+          </div>
+
+          <div class="info-tile">
+            <h3>Seasonality / Transmission Context</h3>
+            <p>
+              Week-of-year seasonal terms and a transmission-style multiplier are included to give
+              the model a better sense of temporal structure and spread conditions.
+            </p>
+          </div>
         </div>
 
-        <p>
-          <strong>Data sources:</strong> Johns Hopkins measles case updates, CDC vaccination and exemption data,
-          U.S. Census commuting flows, and U.S. Census county geography.
-        </p>
+        <h2>Data Sources</h2>
+        <ul class="source-list">
+          <li>Johns Hopkins University CSSE – Measles case updates (county-level)</li>
+          <li>CDC – MMR vaccination coverage and exemptions among kindergartners</li>
+          <li>U.S. Census Bureau – County population estimates</li>
+          <li>U.S. Census Bureau – County-to-county commuting flows</li>
+          <li>U.S. Census Bureau – County geographic and FIPS reference files</li>
+          <li>OpenStreetMap – Basemap tiles</li>
+        </ul>
+
+        <h2>Model Limitations</h2>
+        <ul class="source-list">
+          <li>This model produces relative risk rankings, not exact case forecasts.</li>
+          <li>Rare disease dynamics mean raw probabilities are very small and uncertain.</li>
+          <li>Vaccination data is based on school reporting and may lag real conditions.</li>
+          <li>Commuting flows are used as a proxy for movement and importation risk.</li>
+          <li>The model does not yet include airline passenger flows or a full transmission model.</li>
+          <li>Outputs should be interpreted as early warning indicators, not deterministic predictions.</li>
+        </ul>
 
         <div class="prototype-note">
           <strong>Disclaimer:</strong>

@@ -3,20 +3,22 @@ let geoLayer;
 let forecastByHorizon = {};
 let tablesByHorizon = {};
 let countyGeojson = null;
+let metadata = {};
 
 const horizonSelect = document.getElementById("horizonSelect");
 const metricSelect = document.getElementById("metricSelect");
 
 const metricLabels = {
-  risk_score: "Overall risk score",
-  risk_new_cases_county: "Risk of new county cases",
-  growth_pressure_score: "Growth pressure score",
-  expected_growth_abs: "Expected growth by number"
+  risk_score: "Overall County Risk",
+  new_cases_risk_pct: "Emergence Risk",
+  growth_pressure_score: "Spread Pressure"
 };
 
 async function loadJSON(path) {
   const res = await fetch(path);
-  if (!res.ok) throw new Error(`Failed to load ${path}`);
+  if (!res.ok) {
+    throw new Error(`Failed to load ${path} (${res.status})`);
+  }
   return await res.json();
 }
 
@@ -30,22 +32,28 @@ function initMap() {
 }
 
 function getCurrentRows() {
-  const horizon = horizonSelect.value;
+  const horizon = String(horizonSelect.value);
   return forecastByHorizon[horizon] || [];
 }
 
 function buildLookup(rows) {
   const out = {};
   rows.forEach(r => {
-    out[String(r.county_fips).padStart(5, "0")] = r;
+    const fips = String(r.county_fips || "").padStart(5, "0");
+    if (fips) out[fips] = r;
   });
   return out;
 }
 
+function safeNum(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 function getColorScaled(value, minVal, maxVal) {
-  if (!Number.isFinite(value)) value = 0;
-  if (!Number.isFinite(minVal)) minVal = 0;
-  if (!Number.isFinite(maxVal)) maxVal = 1;
+  value = safeNum(value, 0);
+  minVal = safeNum(minVal, 0);
+  maxVal = safeNum(maxVal, 1);
 
   if (maxVal <= minVal) return "#FFEDA0";
 
@@ -63,19 +71,39 @@ function getColorScaled(value, minVal, maxVal) {
 function renderLegend(metric, minVal, maxVal) {
   const legend = document.getElementById("legend");
   legend.innerHTML = `
-    <strong>${metricLabels[metric]}</strong><br/>
+    <strong>${metricLabels[metric] || metric}</strong><br/>
     Dynamic scale for selected horizon.<br/>
-    Min: ${Number.isFinite(minVal) ? minVal.toFixed(4) : "0.0000"} |
-    Max: ${Number.isFinite(maxVal) ? maxVal.toFixed(4) : "0.0000"}
+    Min: ${Number.isFinite(minVal) ? minVal.toFixed(2) : "0.00"} |
+    Max: ${Number.isFinite(maxVal) ? maxVal.toFixed(2) : "0.00"}
   `;
+}
+
+function updateMetadataUI() {
+  const lastDataDateEl = document.getElementById("lastDataDate");
+  const lastRefreshedEl = document.getElementById("lastRefreshed");
+  const forecastWeekEl = document.getElementById("forecastWeek");
+
+  if (lastDataDateEl) {
+    lastDataDateEl.textContent = metadata.last_data_date || "—";
+  }
+
+  if (lastRefreshedEl) {
+    lastRefreshedEl.textContent = metadata.last_refreshed || "—";
+  }
+
+  if (forecastWeekEl) {
+    const horizon = String(horizonSelect.value);
+    const forecastWeek = metadata.forecast_week_by_horizon?.[horizon] || "—";
+    forecastWeekEl.textContent = forecastWeek;
+  }
 }
 
 function renderMap() {
   const rows = getCurrentRows();
   const metric = metricSelect.value;
 
-  let values = rows
-    .map(r => Number(r[metric]))
+  const values = rows
+    .map(r => safeNum(r[metric], NaN))
     .filter(v => Number.isFinite(v));
 
   const minVal = values.length ? Math.min(...values) : 0;
@@ -83,6 +111,7 @@ function renderMap() {
 
   if (geoLayer) {
     geoLayer.remove();
+    geoLayer = null;
   }
 
   if (!countyGeojson || !countyGeojson.features || countyGeojson.features.length === 0) {
@@ -93,33 +122,27 @@ function renderMap() {
   const lookup = buildLookup(rows);
   const geo = JSON.parse(JSON.stringify(countyGeojson));
 
-  geo.features.forEach(f => {
-    const fips = String(f.id).padStart(5, "0");
+  geo.features.forEach(feature => {
+    const fips = String(feature.id || "").padStart(5, "0");
     const row = lookup[fips];
-    f.properties = f.properties || {};
+    feature.properties = feature.properties || {};
 
     if (row) {
-      f.properties.metricValue = Number(row[metric] || 0);
-      f.properties.county = row.county || f.properties.NAME || "";
-      f.properties.state = row.state || "";
-      f.properties.expected_growth_abs = Number(row.expected_growth_abs || 0);
-      f.properties.expected_growth_pct = Number(row.expected_growth_pct || 0);
-      f.properties.risk_new_cases_county = Number(row.risk_new_cases_county || 0);
-      f.properties.new_cases_risk_pct = Number(row.new_cases_risk_pct || 0);
-      f.properties.risk_score = Number(row.risk_score || 0);
-      f.properties.risk_score_percentile = Number(row.risk_score_percentile || 0);
-      f.properties.growth_pressure_score = Number(row.growth_pressure_score || 0);
+      feature.properties.metricValue = safeNum(row[metric], 0);
+      feature.properties.county = row.county || feature.properties.NAME || "";
+      feature.properties.state = row.state || "";
+      feature.properties.risk_score = safeNum(row.risk_score, 0);
+      feature.properties.risk_score_percentile = safeNum(row.risk_score_percentile, 0);
+      feature.properties.new_cases_risk_pct = safeNum(row.new_cases_risk_pct, 0);
+      feature.properties.growth_pressure_score = safeNum(row.growth_pressure_score, 0);
     } else {
-      f.properties.metricValue = 0;
-      f.properties.county = f.properties.NAME || "";
-      f.properties.state = "";
-      f.properties.expected_growth_abs = 0;
-      f.properties.expected_growth_pct = 0;
-      f.properties.risk_new_cases_county = 0;
-      f.properties.new_cases_risk_pct = 0;
-      f.properties.risk_score = 0;
-      f.properties.risk_score_percentile = 0;
-      f.properties.growth_pressure_score = 0;
+      feature.properties.metricValue = 0;
+      feature.properties.county = feature.properties.NAME || "";
+      feature.properties.state = "";
+      feature.properties.risk_score = 0;
+      feature.properties.risk_score_percentile = 0;
+      feature.properties.new_cases_risk_pct = 0;
+      feature.properties.growth_pressure_score = 0;
     }
   });
 
@@ -137,11 +160,10 @@ function renderMap() {
         <div>
           <strong>${p.county || "County"}</strong><br/>
           State: ${p.state || ""}<br/>
-          Overall risk score: ${Number(p.risk_score || 0).toFixed(4)}<br/>
-          Overall risk percentile: ${Number(p.risk_score_percentile || 0).toFixed(1)}<br/>
-          New county case risk: ${Number(p.new_cases_risk_pct || 0).toFixed(2)}%<br/>
-          Growth pressure score: ${Number(p.growth_pressure_score || 0).toFixed(1)}<br/>
-          Expected growth by number: ${Number(p.expected_growth_abs || 0).toFixed(4)}
+          Overall County Risk: ${safeNum(p.risk_score).toFixed(2)}<br/>
+          Overall Risk Percentile: ${safeNum(p.risk_score_percentile).toFixed(1)}<br/>
+          Emergence Risk: ${safeNum(p.new_cases_risk_pct).toFixed(1)}<br/>
+          Spread Pressure: ${safeNum(p.growth_pressure_score).toFixed(1)}
         </div>
       `;
       layer.bindPopup(html);
@@ -153,6 +175,8 @@ function renderMap() {
 
 function fillTable(tableId, rows) {
   const tbody = document.querySelector(`#${tableId} tbody`);
+  if (!tbody) return;
+
   tbody.innerHTML = "";
 
   rows.slice(0, 25).forEach(r => {
@@ -160,16 +184,16 @@ function fillTable(tableId, rows) {
     tr.innerHTML = `
       <td>${r.county || ""}</td>
       <td>${r.state || ""}</td>
-      <td>${Number(r.risk_score || 0).toFixed(4)}</td>
-      <td>${Number(r.new_cases_risk_pct || 0).toFixed(2)}%</td>
-      <td>${Number(r.growth_pressure_score || 0).toFixed(1)}</td>
+      <td>${safeNum(r.risk_score).toFixed(2)}</td>
+      <td>${safeNum(r.new_cases_risk_pct).toFixed(1)}</td>
+      <td>${safeNum(r.growth_pressure_score).toFixed(1)}</td>
     `;
     tbody.appendChild(tr);
   });
 }
 
 function renderTables() {
-  const horizon = horizonSelect.value;
+  const horizon = String(horizonSelect.value);
   const data = tablesByHorizon[horizon];
   if (!data) return;
 
@@ -179,6 +203,7 @@ function renderTables() {
 }
 
 function rerender() {
+  updateMetadataUI();
   renderMap();
   renderTables();
 }
@@ -188,6 +213,7 @@ async function boot() {
 
   forecastByHorizon = await loadJSON("./data/forecast_by_horizon.json");
   tablesByHorizon = await loadJSON("./data/tables.json");
+  metadata = await loadJSON("./data/metadata.json");
 
   try {
     countyGeojson = await loadJSON("./data/counties_h1.geojson");
