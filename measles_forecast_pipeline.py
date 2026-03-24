@@ -10,8 +10,12 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 import requests
+from dotenv import load_dotenv
 from sklearn.metrics import mean_absolute_error, roc_auc_score
 from xgboost import XGBClassifier, XGBRegressor
+
+# Load .env
+load_dotenv()
 
 # =========================
 # CONFIG
@@ -27,7 +31,11 @@ LOCAL_VACC_CSV = "./cache/Vaccination_Coverage_and_Exemptions_among_Kindergartne
 LOCAL_GAZETTEER_TXT = "./cache/2025_Gaz_counties_national.txt"
 LOCAL_COUNTY_GEOJSON = "./cache/geojson-counties-fips.json"
 
-USER_AGENT = "measles-forecast-app/1.2"
+USER_AGENT = "measles-forecast-app/1.4"
+
+# Reads automatically from .env
+CENSUS_API_KEY = os.getenv("CENSUS_API_KEY", "")
+CENSUS_COUNTY_POP_URL = "https://api.census.gov/data/2023/pep/population"
 
 STATE_ABBR = {
     "01": "AL", "02": "AK", "04": "AZ", "05": "AR", "06": "CA", "08": "CO",
@@ -61,7 +69,6 @@ STATE_NAME_TO_ABBR = {
     "vermont": "VT", "virginia": "VA", "washington": "WA", "west virginia": "WV",
     "wisconsin": "WI", "wyoming": "WY", "puerto rico": "PR"
 }
-
 
 # =========================
 # HELPERS
@@ -309,6 +316,18 @@ def build_weekly_history(history: pd.DataFrame) -> pd.DataFrame:
 
     return weekly
 
+def minmax_scale(series: pd.Series, low: float = 0.0, high: float = 100.0) -> pd.Series:
+    s = pd.to_numeric(series, errors="coerce").fillna(0.0)
+    smin = s.min()
+    smax = s.max()
+
+    if not np.isfinite(smin) or not np.isfinite(smax):
+        return pd.Series(np.full(len(s), low), index=s.index)
+
+    if smax - smin < 1e-12:
+        return pd.Series(np.full(len(s), (low + high) / 2.0), index=s.index)
+
+    return low + (s - smin) * (high - low) / (smax - smin)
 
 # =========================
 # STEP 2: COUNTY BASE
@@ -386,7 +405,6 @@ def load_cdc_state_mmr(local_path: str = LOCAL_VACC_CSV) -> pd.DataFrame:
     temp["School Year"] = temp["School Year"].astype(str)
     temp["Estimate (%)"] = pd.to_numeric(temp["Estimate (%)"], errors="coerce")
 
-    # MMR rows
     mmr = temp[
         temp["Vaccine/Exemption"].str.contains("mmr", na=False) &
         temp["Geography Type"].str.contains("state", na=False)
@@ -395,7 +413,6 @@ def load_cdc_state_mmr(local_path: str = LOCAL_VACC_CSV) -> pd.DataFrame:
     if mmr.empty:
         raise ValueError("No MMR state rows found in vaccination file.")
 
-    # Prefer 2-dose if present
     mmr_2 = mmr[mmr["Dose"].str.contains("2", na=False)].copy()
     if not mmr_2.empty:
         mmr = mmr_2
@@ -410,7 +427,6 @@ def load_cdc_state_mmr(local_path: str = LOCAL_VACC_CSV) -> pd.DataFrame:
     )
     mmr_out["state_abbr"] = mmr_out["Geography"].apply(state_abbr_from_any)
 
-    # Exemption rows
     ex = temp[
         temp["Vaccine/Exemption"].str.contains("exemption", na=False) &
         temp["Geography Type"].str.contains("state", na=False)
@@ -420,7 +436,6 @@ def load_cdc_state_mmr(local_path: str = LOCAL_VACC_CSV) -> pd.DataFrame:
         latest_ex_year = ex["School Year"].dropna().max()
         ex = ex[ex["School Year"] == latest_ex_year].copy()
 
-        # Prefer "Any Exemption" / total if present
         pref = ex[
             ex["Vaccine/Exemption"].str.contains("any", na=False) |
             ex["Vaccine/Exemption"].str.contains("total", na=False)
@@ -453,7 +468,6 @@ def load_cdc_state_mmr(local_path: str = LOCAL_VACC_CSV) -> pd.DataFrame:
 def load_commuting_flows(local_path: str = LOCAL_COMMUTER_CSV) -> pd.DataFrame:
     """
     Parse commuter.csv with a two-row header and duplicate labels.
-    This version assigns columns by position after reconstructing the header.
     """
     if not os.path.exists(local_path):
         raise FileNotFoundError(f"Missing {local_path}")
@@ -514,6 +528,7 @@ def load_commuting_flows(local_path: str = LOCAL_COMMUTER_CSV) -> pd.DataFrame:
     flow = flow[flow["origin_fips"] != flow["dest_fips"]].copy()
 
     return flow
+
 
 def build_fallback_commuting_flows(county_base: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(columns=["origin_fips", "dest_fips", "workers"])
@@ -582,10 +597,56 @@ def build_commuting_exposure(
 
 
 # =========================
+# STEP 4B: COUNTY POPULATION
+# =========================
+
+def load_county_population_from_census(api_key: str = CENSUS_API_KEY) -> pd.DataFrame:
+    if not api_key:
+        raise ValueError("CENSUS_API_KEY not found. Add it to your .env file.")
+
+    # ACS 2023 5-year total population by county
+    url = "https://api.census.gov/data/2023/acs/acs5"
+    params = {
+        "get": "NAME,B01003_001E",
+        "for": "county:*",
+        "in": "state:*",
+        "key": api_key
+    }
+
+    resp = requests.get(
+        url,
+        params=params,
+        headers={"User-Agent": USER_AGENT},
+        timeout=120
+    )
+    resp.raise_for_status()
+
+    try:
+        data = resp.json()
+    except Exception:
+        raise ValueError(f"Census API did not return valid JSON. Response preview: {resp.text[:500]}")
+
+    df = pd.DataFrame(data[1:], columns=data[0])
+    df["county_fips"] = df["state"].astype(str).str.zfill(2) + df["county"].astype(str).str.zfill(3)
+    df["population"] = pd.to_numeric(df["B01003_001E"], errors="coerce")
+
+    out = df[["county_fips", "population"]].dropna().copy()
+    out["population"] = out["population"].clip(lower=1)
+
+    return out
+
+# =========================
 # STEP 5: PANEL FEATURES
 # =========================
 
-def create_full_week_grid(weekly: pd.DataFrame, county_base: pd.DataFrame) -> pd.DataFrame:
+
+
+
+def create_full_week_grid(
+    weekly: pd.DataFrame,
+    county_base: pd.DataFrame,
+    county_population: Optional[pd.DataFrame] = None
+) -> pd.DataFrame:
     min_week = weekly["week"].min()
     max_week = weekly["week"].max()
     all_weeks = pd.date_range(min_week, max_week, freq="W-SAT")
@@ -596,6 +657,13 @@ def create_full_week_grid(weekly: pd.DataFrame, county_base: pd.DataFrame) -> pd
         ["county_fips", "county_name_gaz", "state_abbr", "centroid_lat", "centroid_lon", "air_travel_proxy"]
     ].drop_duplicates().copy()
     counties = counties[counties["county_fips"].isin(active_fips)].copy()
+
+    if county_population is not None and not county_population.empty:
+        counties = counties.merge(county_population, on="county_fips", how="left")
+    else:
+        counties["population"] = np.nan
+
+    counties["population"] = counties["population"].fillna(100000)
 
     counties["key"] = 1
     weeks_df = pd.DataFrame({"week": all_weeks, "key": 1})
@@ -611,8 +679,8 @@ def create_full_week_grid(weekly: pd.DataFrame, county_base: pd.DataFrame) -> pd
     panel["state"] = panel["state"].fillna(panel["state_abbr"])
     panel["cumulative_cases"] = panel.groupby("county_fips")["cumulative_cases"].ffill().fillna(0)
     panel["new_cases_week"] = panel["new_cases_week"].fillna(0)
-    panel["population_proxy"] = 100000
 
+    panel["population_proxy"] = pd.to_numeric(panel["population"], errors="coerce").fillna(100000)
     return panel
 
 
@@ -629,6 +697,10 @@ def add_local_lag_features(panel: pd.DataFrame) -> pd.DataFrame:
     panel["had_any_case_ever"] = (panel["cum_lag_1"].fillna(0) > 0).astype(int)
     panel["week_of_year"] = panel["week"].dt.isocalendar().week.astype(int)
     panel["month"] = panel["week"].dt.month.astype(int)
+
+    # seasonality terms
+    panel["week_sin"] = np.sin(2 * np.pi * panel["week_of_year"] / 52.0)
+    panel["week_cos"] = np.cos(2 * np.pi * panel["week_of_year"] / 52.0)
 
     return panel
 
@@ -730,6 +802,15 @@ def finalize_features(panel: pd.DataFrame) -> pd.DataFrame:
         (1 + panel["cases_last_4w"])
     )
 
+    # simple R-like transmission multiplier for display/modeling context
+    panel["transmission_multiplier"] = (
+        0.35 * np.log1p(panel["cases_last_4w"].fillna(0)) +
+        0.25 * np.log1p(panel["importation_pressure"].fillna(0)) +
+        0.20 * (panel["susceptible_proxy"].fillna(7.5) / 10.0) +
+        0.10 * panel["week_sin"].fillna(0) +
+        0.10 * panel["week_cos"].fillna(0)
+    )
+
     return panel
 
 
@@ -768,11 +849,11 @@ FEATURE_COLS = [
     "cases_lag_1", "cases_lag_2", "cases_lag_3", "cases_lag_4",
     "cum_lag_1", "cum_lag_2", "cum_lag_3", "cum_lag_4",
     "cases_last_4w", "cases_trend", "active_recent", "had_any_case_ever",
-    "week_of_year", "month",
+    "week_of_year", "month", "week_sin", "week_cos",
     "commuting_exposure", "inbound_workers", "neighbor_exposure",
     "avg_neighbor_distance", "mmr_coverage_pct", "exemption_pct",
     "susceptible_proxy", "air_travel_proxy", "travel_pressure",
-    "importation_pressure", "spread_potential_index"
+    "importation_pressure", "spread_potential_index", "transmission_multiplier"
 ]
 
 
@@ -783,7 +864,6 @@ def train_forecast_models(panel: pd.DataFrame, horizons: int) -> Tuple[pd.DataFr
     usable = panel.copy()
     usable = usable.dropna(subset=["cases_lag_1"]).copy()
 
-    # Reduce domination by all-zero rows while keeping some background zeros
     usable["recent_signal"] = (
         (usable["cases_last_4w"].fillna(0) > 0) |
         (usable["commuting_exposure"].fillna(0) > 0) |
@@ -822,7 +902,6 @@ def train_forecast_models(panel: pd.DataFrame, horizons: int) -> Tuple[pd.DataFr
         X_train = train_h[FEATURE_COLS].fillna(0)
         X_test = test_h[FEATURE_COLS].fillna(0)
 
-        # Log-transform sparse count target so model doesn't just collapse to zeros
         y_train_reg = np.log1p(train_h[y_reg].clip(lower=0))
 
         reg = XGBRegressor(
@@ -841,7 +920,6 @@ def train_forecast_models(panel: pd.DataFrame, horizons: int) -> Tuple[pd.DataFr
             pred_abs = np.clip(pred_abs, a_min=0, a_max=None)
             mae = mean_absolute_error(test_h[y_reg], pred_abs)
         else:
-            pred_abs = np.array([])
             mae = None
 
         train_cls = train_df.dropna(subset=[y_cls]).copy()
@@ -851,6 +929,7 @@ def train_forecast_models(panel: pd.DataFrame, horizons: int) -> Tuple[pd.DataFr
         Xc_test = test_cls[FEATURE_COLS].fillna(0)
 
         clf = None
+        auc = None
         if not train_cls.empty and train_cls[y_cls].nunique() > 1:
             pos = int(train_cls[y_cls].sum())
             neg = int(len(train_cls) - pos)
@@ -868,13 +947,9 @@ def train_forecast_models(panel: pd.DataFrame, horizons: int) -> Tuple[pd.DataFr
             )
             clf.fit(Xc_train, train_cls[y_cls])
 
-            if len(test_cls) > 0:
+            if len(test_cls) > 0 and test_cls[y_cls].nunique() > 1:
                 pred_new_area_prob = clf.predict_proba(Xc_test)[:, 1]
-                auc = roc_auc_score(test_cls[y_cls], pred_new_area_prob) if test_cls[y_cls].nunique() > 1 else None
-            else:
-                auc = None
-        else:
-            auc = None
+                auc = roc_auc_score(test_cls[y_cls], pred_new_area_prob)
 
         metrics[f"h{h}"] = {
             "growth_abs_mae": None if mae is None else float(mae),
@@ -893,8 +968,9 @@ def train_forecast_models(panel: pd.DataFrame, horizons: int) -> Tuple[pd.DataFr
         latest_pred_pct = np.where(
             latest["cumulative_cases"] > 0,
             latest_pred_abs / latest["cumulative_cases"].replace(0, np.nan),
-            np.nan
+            0.0
         )
+        latest_pred_pct = np.nan_to_num(latest_pred_pct, nan=0.0, posinf=0.0, neginf=0.0)
 
         if clf is not None:
             latest_new_prob = clf.predict_proba(X_latest)[:, 1]
@@ -904,31 +980,32 @@ def train_forecast_models(panel: pd.DataFrame, horizons: int) -> Tuple[pd.DataFr
         scored = latest[[
             "county_fips", "county", "state", "week", "cumulative_cases", "new_cases_week",
             "state_abbr", "centroid_lat", "centroid_lon",
-            "importation_pressure", "cases_last_4w", "susceptible_proxy"
+            "importation_pressure", "cases_last_4w", "susceptible_proxy",
+            "transmission_multiplier"
         ]].copy()
 
         scored["horizon_weeks"] = h
         scored["forecast_week"] = scored["week"] + pd.to_timedelta(7 * h, unit="D")
         scored["expected_growth_abs"] = latest_pred_abs
-        scored["expected_growth_pct"] = np.nan_to_num(
-            latest_pred_pct, nan=0.0, posinf=0.0, neginf=0.0
-        )
+        scored["expected_growth_pct"] = latest_pred_pct
         scored["risk_new_cases_county"] = latest_new_prob
 
-        # Better for sparse outbreak conditions:
-        # emphasize emergence risk and transmission/importation context
-        scored["risk_score"] = (
+        horizon_scale = 1.0 + (0.18 * (h - 1))
+
+        scored["risk_score"] = horizon_scale * (
             0.35 * scored["risk_new_cases_county"] +
             0.20 * np.log1p(scored["expected_growth_abs"]) +
             0.10 * scored["expected_growth_pct"].clip(lower=0, upper=10) +
-            0.15 * np.log1p(latest["importation_pressure"].fillna(0)) +
-            0.10 * np.log1p(latest["cases_last_4w"].fillna(0)) +
-            0.10 * (latest["susceptible_proxy"].fillna(7.5) / 10.0)
+            0.15 * np.log1p(scored["importation_pressure"].fillna(0)) +
+            0.10 * np.log1p(scored["cases_last_4w"].fillna(0)) +
+            0.10 * (scored["susceptible_proxy"].fillna(7.5) / 10.0)
         )
+
         scored_frames.append(scored)
 
     forecast = pd.concat(scored_frames, ignore_index=True)
     return forecast, metrics
+
 
 # =========================
 # STEP 8: WEBSITE EXPORTS
@@ -947,49 +1024,108 @@ def write_web_outputs(forecast: pd.DataFrame, outdir: Path) -> None:
     safe_mkdir(web_data_dir)
 
     forecast = forecast.copy()
-    forecast["week"] = forecast["week"].astype(str)
-    forecast["forecast_week"] = forecast["forecast_week"].astype(str)
+    forecast["week_dt"] = pd.to_datetime(forecast["week"])
+    forecast["forecast_week_dt"] = pd.to_datetime(forecast["forecast_week"])
 
-    # Smoothed display version of new-county risk for rare-event settings
-    emergence_signal = (
-        0.45 * forecast["risk_new_cases_county"].fillna(0) +
-        0.20 * np.log1p(forecast["importation_pressure"].fillna(0)) +
+    if "neighbor_exposure" not in forecast.columns:
+        forecast["neighbor_exposure"] = 0.0
+
+    def minmax_scale(series: pd.Series, low: float = 0.0, high: float = 100.0) -> pd.Series:
+        s = pd.to_numeric(series, errors="coerce").fillna(0.0)
+        smin = s.min()
+        smax = s.max()
+
+        if not np.isfinite(smin) or not np.isfinite(smax):
+            return pd.Series(np.full(len(s), low), index=s.index)
+
+        if smax - smin < 1e-12:
+            return pd.Series(np.full(len(s), (low + high) / 2.0), index=s.index)
+
+        return low + (s - smin) * (high - low) / (smax - smin)
+
+    h = forecast["horizon_weeks"].fillna(1).astype(float)
+
+    # -----------------------------
+    # EMERGENCE RISK
+    # -----------------------------
+    # Favor counties with low/no established cases, but meaningful importation/susceptibility.
+    no_established_outbreak_factor = np.where(
+        forecast["cumulative_cases"].fillna(0) <= 0,
+        1.25,
+        1.0 / (1.0 + np.log1p(forecast["cumulative_cases"].fillna(0)))
+    )
+
+    emergence_raw = (
+        0.70 * forecast["risk_new_cases_county"].fillna(0) +
+        0.15 * np.log1p(forecast["importation_pressure"].fillna(0) * h) +
+        0.10 * (forecast["susceptible_proxy"].fillna(7.5) / 10.0) +
+        0.05 * np.log1p(forecast["neighbor_exposure"].fillna(0))
+    ) * no_established_outbreak_factor * (1.0 + 0.20 * (h - 1.0))
+
+    # -----------------------------
+    # SPREAD PRESSURE
+    # -----------------------------
+    # Favor counties with established activity and expected further growth.
+    existing_activity_factor = (
+        np.log1p(forecast["cumulative_cases"].fillna(0)) +
+        1.5 * np.log1p(forecast["cases_last_4w"].fillna(0))
+    )
+
+    spread_raw = (
+        0.50 * np.log1p(forecast["expected_growth_abs"].fillna(0) * h) +
         0.20 * np.log1p(forecast["cases_last_4w"].fillna(0)) +
-        0.15 * (forecast["susceptible_proxy"].fillna(7.5) / 10.0)
+        0.15 * np.log1p(forecast["transmission_multiplier"].fillna(0)) +
+        0.10 * np.log1p(forecast["importation_pressure"].fillna(0)) +
+        0.05 * np.log1p(forecast["cumulative_cases"].fillna(0))
+    ) * (1.0 + 0.30 * (h - 1.0)) * (1.0 + 0.25 * existing_activity_factor)
+
+    # -----------------------------
+    # OVERALL RISK
+    # -----------------------------
+    # Blend both, plus modest independent context.
+    overall_raw = (
+        0.50 * emergence_raw +
+        0.35 * spread_raw +
+        0.10 * np.log1p(forecast["importation_pressure"].fillna(0) * h) +
+        0.05 * (forecast["susceptible_proxy"].fillna(7.5) / 10.0)
     )
 
-    # Convert to within-horizon 0-100 scale
-    forecast["new_cases_risk_pct"] = (
-        emergence_signal.groupby(forecast["horizon_weeks"])
-        .rank(pct=True, method="average") * 100
-    )
+    # -----------------------------
+    # SCALE GLOBALLY ACROSS ALL HORIZONS
+    # -----------------------------
+    # This preserves real differences across horizon choices.
+    forecast["new_cases_risk_pct"] = minmax_scale(emergence_raw, 0, 100)
+    forecast["growth_pressure_score"] = minmax_scale(spread_raw, 0, 100)
+    forecast["risk_score"] = minmax_scale(overall_raw, 0, 100)
 
-    forecast["growth_pressure_score"] = (
-        0.45 * np.log1p(forecast["expected_growth_abs"].fillna(0)) +
-        0.25 * np.log1p(forecast["importation_pressure"].fillna(0)) +
-        0.20 * np.log1p(forecast["cases_last_4w"].fillna(0)) +
-        0.10 * (forecast["susceptible_proxy"].fillna(7.5) / 10.0)
-    )
-
-    # Convert growth pressure to within-horizon 0-100 scale
-    forecast["growth_pressure_score"] = (
-        forecast.groupby("horizon_weeks")["growth_pressure_score"]
-        .rank(pct=True, method="average") * 100
-    )
-
-    # Recompute display risk score using smoothed emergence score
-    forecast["risk_score"] = (
-        0.40 * (forecast["new_cases_risk_pct"] / 100.0) +
-        0.20 * np.log1p(forecast["expected_growth_abs"].fillna(0)) +
-        0.15 * np.log1p(forecast["importation_pressure"].fillna(0)) +
-        0.15 * np.log1p(forecast["cases_last_4w"].fillna(0)) +
-        0.10 * (forecast["susceptible_proxy"].fillna(7.5) / 10.0)
-    )
-
+    # Keep percentile as a separate relative-within-horizon reference if desired
     forecast["risk_score_percentile"] = (
-        forecast.groupby("horizon_weeks")["risk_score"]
+        overall_raw.groupby(forecast["horizon_weeks"])
         .rank(pct=True, method="average") * 100
     )
+
+    last_data_date = forecast["week_dt"].max().strftime("%Y-%m-%d")
+    last_refreshed = pd.Timestamp.now("UTC").strftime("%Y-%m-%d %H:%M UTC")
+
+    forecast_week_by_horizon = {}
+    for hh in sorted(forecast["horizon_weeks"].unique()):
+        dfh_meta = forecast[forecast["horizon_weeks"] == hh].copy()
+        forecast_week_by_horizon[str(int(hh))] = (
+            dfh_meta["forecast_week_dt"].iloc[0].strftime("%Y-%m-%d") if not dfh_meta.empty else ""
+        )
+
+    metadata = {
+        "last_data_date": last_data_date,
+        "last_refreshed": last_refreshed,
+        "forecast_week_by_horizon": forecast_week_by_horizon
+    }
+
+    with open(web_data_dir / "metadata.json", "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+
+    forecast["week"] = forecast["week_dt"].dt.strftime("%Y-%m-%d")
+    forecast["forecast_week"] = forecast["forecast_week_dt"].dt.strftime("%Y-%m-%d")
+    forecast = forecast.drop(columns=["week_dt", "forecast_week_dt"])
 
     forecast.to_csv(outdir / "county_measles_forecast.csv", index=False)
 
@@ -998,10 +1134,10 @@ def write_web_outputs(forecast: pd.DataFrame, outdir: Path) -> None:
         json.dump(forecast_clean.to_dict(orient="records"), f, indent=2, allow_nan=False)
 
     tables = {}
-    for h in sorted(forecast["horizon_weeks"].unique()):
-        dfh = forecast[forecast["horizon_weeks"] == h].copy()
+    for hh in sorted(forecast["horizon_weeks"].unique()):
+        dfh = forecast[forecast["horizon_weeks"] == hh].copy()
 
-        tables[str(h)] = {
+        tables[str(int(hh))] = {
             "top_risk_score": (
                 dfh.sort_values("risk_score", ascending=False)
                    .head(50)[[
@@ -1049,6 +1185,7 @@ def write_web_outputs(forecast: pd.DataFrame, outdir: Path) -> None:
         print(f"Warning: could not load county GeoJSON for website map: {e}")
         geojson = {"type": "FeatureCollection", "features": []}
 
+    # keep default map file as horizon 1, frontend overlays current horizon values
     h1 = forecast[forecast["horizon_weeks"] == forecast["horizon_weeks"].min()].copy()
     h1 = h1.replace({np.nan: None})
     lookup = {row["county_fips"]: row for _, row in h1.iterrows()}
@@ -1086,14 +1223,14 @@ def write_web_outputs(forecast: pd.DataFrame, outdir: Path) -> None:
         json.dump(geojson, f, allow_nan=False)
 
     horizon_dict = {}
-    for h in sorted(forecast["horizon_weeks"].unique()):
-        dfh = forecast[forecast["horizon_weeks"] == h].copy()
+    for hh in sorted(forecast["horizon_weeks"].unique()):
+        dfh = forecast[forecast["horizon_weeks"] == hh].copy()
         dfh = dfh.replace({np.nan: None})
-        horizon_dict[str(h)] = dfh.to_dict(orient="records")
+        horizon_dict[str(int(hh))] = dfh.to_dict(orient="records")
 
     with open(web_data_dir / "forecast_by_horizon.json", "w", encoding="utf-8") as f:
         json.dump(horizon_dict, f, indent=2, allow_nan=False)
-            
+        
 # =========================
 # MAIN
 # =========================
@@ -1141,8 +1278,15 @@ def run_pipeline(history_csv: Optional[str], outdir: str, horizons: int):
         print(f"Warning: commuting load failed, continuing without commuting flows. Error: {e}")
         flows = build_fallback_commuting_flows(county_base)
 
+    print("Loading county population from Census API...")
+    try:
+        county_population = load_county_population_from_census()
+    except Exception as e:
+        print(f"Warning: Census county population load failed, using default population proxy. Error: {e}")
+        county_population = pd.DataFrame(columns=["county_fips", "population"])
+
     print("Creating county-week panel...")
-    panel = create_full_week_grid(weekly, county_base)
+    panel = create_full_week_grid(weekly, county_base, county_population=county_population)
     panel = add_local_lag_features(panel)
     panel = add_spatial_neighbor_features(panel, county_base)
     panel = add_vaccination_features(panel, mmr_state)
