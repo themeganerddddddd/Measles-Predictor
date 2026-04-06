@@ -2,25 +2,25 @@
   "h1": {
     "growth_abs_mae": 0.0,
     "new_area_auc": null,
-    "train_rows": 12384,
-    "test_rows": 2580
+    "train_rows": 13300,
+    "test_rows": 2926
   },
   "h2": {
     "growth_abs_mae": 0.0,
     "new_area_auc": null,
-    "train_rows": 12384,
-    "test_rows": 2322
+    "train_rows": 13300,
+    "test_rows": 2660
   },
   "h3": {
     "growth_abs_mae": 0.0,
     "new_area_auc": null,
-    "train_rows": 12384,
-    "test_rows": 2064
+    "train_rows": 13300,
+    "test_rows": 2394
   },
   "h4": {
     "growth_abs_mae": 0.0,
     "new_area_auc": null,
-    "train_rows": 12384,
-    "test_rows": 1806
+    "train_rows": 13300,
+    "test_rows": 2128
   }
 }
